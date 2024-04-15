@@ -1,64 +1,79 @@
 trigger:
   branches:
     include:
-      - main
-      
-pool:
-  name: Default
+      - main  # Change this to your main branch name
+
+variables:
+  solution: '**/*.sln'
+  buildPlatform: 'Any CPU'
+  buildConfiguration: 'Release'
+  azureWebApp: 'karthik2-webapp'  # Change this to your Azure Web App name
 
 stages:
 - stage: Build
-  displayName: 'Build Docker Image and Test'
+  displayName: 'Build stage'
   jobs:
-  - job: CI
-    displayName: 'Continuous Integration'
+  - job: Build
+    displayName: 'Build job'
+    pool:
+      name: Default   # Use the default agent pool where your self-hosted agent is registered
     steps:
-    - script: |
-        echo 'Building Docker image...'
-        docker build -t myapp:latest .
-      displayName: 'Build Docker Image'
+    - checkout: self
+      submodules: true
 
-    - script: |
-        echo 'Logging in to Azure Container Registry...'
-        az acr login --name azuredevopspoc.azurecr.io --username AzureDevOpsPOC --password <ACR password>
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore dependencies'
+      inputs:
+        command: 'restore'
+        projects: '$(solution)'
 
-    - script: |
-        echo 'Pushing Docker image to Azure Container Registry...'
-        docker tag myapp:latest azuredevopspoc.azurecr.io/myapp:latest
-        docker push azuredevopspoc.azurecr.io/myapp:latest
-      displayName: 'Push Docker Image to ACR'
+    - task: DotNetCoreCLI@2
+      displayName: 'Build the project'
+      inputs:
+        command: 'build'
+        projects: '$(solution)'
+        arguments: '--configuration $(buildConfiguration)'
 
-    - script: |
-        echo 'Running tests...'
-        # Add your test commands here
-      displayName: 'Run tests'
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish the project'
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        arguments: '--configuration $(buildConfiguration) --output $(build.artifactstagingdirectory)'
+        zipAfterPublish: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact'
+      inputs:
+        pathtoPublish: '$(build.artifactstagingdirectory)'
+        artifactName: 'drop'
 
 - stage: Deploy
-  displayName: 'Deploy to Azure Web App'
+  displayName: 'Deploy stage'
+  dependsOn: Build
   jobs:
-  - job: CD
-    displayName: 'Continuous Deployment'
-    steps:
-    - task: UseDotNet@2
-      displayName: 'Install .NET Core sdk'
-      inputs:
-        packageType: 'sdk'
-        version: '8.x'  # Use version 8.x for .NET Core 3.1
+  - deployment: DeploymentJob
+    displayName: 'Deploy job'
+    pool:
+      name: Default   # Use the default agent pool where your self-hosted agent is registered
+    environment: 'qa'  # Change this to your environment name in Azure DevOps
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: none  # Skip checking out the code again
+          - task: DownloadBuildArtifacts@0
+            displayName: 'Download artifact'
+            inputs:
+              buildType: 'current'
+              artifactName: 'drop'
+              downloadPath: '$(System.ArtifactsDirectory)'
 
-    - task: Docker@2
-      displayName: 'Pull Docker Image'
-      inputs:
-        command: 'pull'
-        repository: 'azuredevopspoc.azurecr.io/myapp'
-        tags: 'latest'
-
-    - task: AzureRmWebAppDeployment@4
-      displayName: 'Azure Web App Deploy'
-      inputs:
-        ConnectionType: 'AzureRM'
-        azureSubscription: 'Azure_DevOps_Service_Connection'
-        appType: 'webApp'
-        WebAppName: 'Tab-WebApp'
-        packageForLinux: '$(Build.ArtifactStagingDirectory)/*/.zip'
-        enableCustomDeployment: true
-        deploymentMethod: 'zipDeploy'
+          - task: AzureWebApp@1
+            displayName: 'Azure Web App Deploy'
+            inputs:
+              azureSubscription: 'testintegration'  # The name of your Azure service connection
+              appType: 'webApp'
+              appName: '$(azureWebApp)'
+              package: '$(System.ArtifactsDirectory)/drop/**/*.zip'
+              deploymentMethod: 'zipDeploy'  # Use zip deployment for self-hosted agents
